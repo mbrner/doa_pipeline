@@ -148,7 +148,8 @@ class DAQ:
             raise ValueError('"start_node" is a node from a different DAQ')
         if end_node not in self.nodes:
             raise ValueError('"end_node" is a node from a different DAQ')
-        start_node.add_edge(end_node, payload=payload, replace=replace)
+        edge = start_node.add_edge(end_node, payload=payload, replace=replace)
+        return edge
 
     @property
     def edges(self):
@@ -160,9 +161,9 @@ class DAQ:
 
     def to_dict(self):
         d = {'name': self.name,
-             'nodes': {hash(v): {'name': v.name, 'payload': v.payload} for v in self.nodes},
-             'edges': [{'start': hash(e.start),
-                        'stop': hash(e.stop),
+             'nodes': {str(hash(v)): {'name': v.name, 'payload': v.payload} for v in self.nodes},
+             'edges': [{'start': str(hash(e.start)),
+                        'stop': str(hash(e.stop)),
                         'payload': e.payload} for e in self.edges]}
         return d
 

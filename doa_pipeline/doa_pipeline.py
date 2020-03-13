@@ -12,10 +12,7 @@ from typing import (
     Set,
     Tuple,
     Union,
-    Integer,
-    DateTime,
-    cast,
-    Enum)
+    cast)
 import enum
 
 import sqlalchemy as sa
@@ -27,21 +24,25 @@ from .db_utils import ArrayOfEnum
 class NodeStatus(enum.Enum):
     FAILED = -1
     PENDING = 0
-    RUNNING = 1
-    FINISHED = 2
+    QUEUED = 1
+    RUNNING = 2
+    FINISHED = 3
 
 
 class ProcessStatus(enum.Enum):
     FAILED = -1
     PENDING = 0
-    RUNNING = 1
-    FINISHED = 2
+    QUEUED = 1
+    RUNNING = 2
+    FINISHED = 3
+    PAUSED = 10
 
 
 @dataclasses.dataclass
 class DOANodeConfig:
-    result_columns: List[Column] = dataclasses.field(default_factory=lambda: [])
+    name: str
     version: str
+    result_columns: List[sa.Column] = dataclasses.field(default_factory=lambda: [])
 
 
 
@@ -54,20 +55,21 @@ class DOADataLayer:
         self.daq = DAQ(name)
         self.columns = {}
         
-    def create_node(self, name, doa_node_cfg):
+    def create_node(self, doa_node_cfg):
+        name = doa_node_cfg.name
         node_columns = []
         for col in doa_node_cfg.result_columns:
             new_col = copy.copy(col)
-            new_col.name = self.column_name_func(self.name, self.daq.name, col)
+            new_col.name = self.column_name_func(name, self.daq.name, col)
             node_columns.append(new_col)
         node = Node(name,
                       payload={'version': doa_node_cfg.version,
                                'column_names': [c.name for c in node_columns]},
                       daq=self.daq)
-        self.columns[name] = node_columns
+        self.columns[node] = node_columns
         return node
 
-    def create_db_table(self, base):
+    def build_db_table(self):
         sorted_nodes = self.daq.sorted_nodes
         node_order = {n.name.upper(): i for i, n in  enumerate(sorted_nodes)}
         node_order['INITIALIZED'] = -1
@@ -77,9 +79,9 @@ class DOADataLayer:
             sa.Column('id',
                       sa.Integer,
                       primary_key=True),
-            sa.column('daq', sa.Text, default=jsonified_daq),
+            sa.Column('daq', sa.Text, default=jsonified_daq),
             sa.Column('node_status',
-                      ArrayOfEnum(NodeStatus),
+                      ArrayOfEnum(sa.Enum(NodeStatus)),
                       default=[ProcessStatus.PENDING
                                for _ in range(len(node_order))]),
             sa.Column('last_update_time',
@@ -88,11 +90,11 @@ class DOADataLayer:
             sa.Column('last_update_node',
                       sa.Enum(update_enum),
                       default=lambda: update_enum(-1)),
-            sa.Column(sa.Text, default='')]
+            sa.Column('final_result', sa.Text, default='')]
         for node in sorted_nodes:
-            table_cols.extend([*self.colums[node].values()])
+            table_cols.extend(self.columns.get(node, []))
 
-        metadata = sa.Metadata()
+        metadata = sa.MetaData()
         process_table = sa.Table(f'{self.name}', metadata, *table_cols)
 
         return process_table
@@ -101,4 +103,4 @@ class DOADataLayer:
         return self.daq.__enter__()
 
     def __exit__(self, _type, _value, _tb) -> None:
-        return self.daq.__exit__(self, _type, _value, _tb)
+        return self.daq.__exit__(_type, _value, _tb)
