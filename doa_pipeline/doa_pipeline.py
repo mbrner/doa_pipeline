@@ -16,6 +16,7 @@ from typing import (
 import enum
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSON
 
 from .daq import DAQ, Node
 from .db_utils import ArrayOfEnum
@@ -80,6 +81,7 @@ class DOADataLayer:
                       sa.Integer,
                       primary_key=True),
             sa.Column('daq', sa.Text, default=jsonified_daq),
+            sa.Column('context', sa.Text, default=json.dumps({})),
             sa.Column('node_status',
                       ArrayOfEnum(sa.Enum(NodeStatus)),
                       default=[ProcessStatus.PENDING
