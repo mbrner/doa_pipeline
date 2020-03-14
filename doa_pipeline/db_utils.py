@@ -1,6 +1,8 @@
 import re
-from sqlalchemy.dialects.postgresql import ARRAY
-from sqlalchemy.orm import sessionmaker 
+from contextlib import contextmanager
+
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.dialects import postgresql
 from sqlalchemy import cast
 
 
@@ -23,7 +25,7 @@ def create_engine_context(engine):
     return session_scope
 
 
-class ArrayOfEnum(ARRAY):
+class ArrayOfEnum(postgresql.ARRAY):
     def bind_expression(self, bindvalue):
         return cast(bindvalue, self)
 
