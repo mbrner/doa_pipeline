@@ -17,9 +17,11 @@ def create_engine_context(engine):
             yield session
             session.commit()
         except:
+            print('ERROR')
             session.rollback()
             raise
         finally:
+            print('CLOSING')
             session.close()
     
     return session_scope
