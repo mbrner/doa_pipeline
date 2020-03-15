@@ -16,6 +16,8 @@ from typing import (
     cast)
 import enum
 from contextlib import contextmanager
+import traceback
+import io
 
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
@@ -34,6 +36,7 @@ class NodeStatus(enum.Enum):
     QUEUED = 'Q'
     RUNNING = 'R'
     SUCCESS = 'S'
+    UNKNOWN = 'U'
 
 
 class ProcessStatus(enum.Enum):
@@ -43,6 +46,7 @@ class ProcessStatus(enum.Enum):
     RUNNING = 'R'
     SUCCESS = 'S'
     PAUSED = 'P'
+    UNKNOWN = 'U'
 
 
 
@@ -65,11 +69,16 @@ class DOANodeConfig:
         except (IndexError, KeyError):
             raise AttributeError(f"'DOANodeConfig' has no ttribute '{name}'")
 
+
 @dataclasses.dataclass
 class ProcessingContext:
     config: DOANodeConfig
-    dag_context: Dict
-    results: Dict = dataclasses.field(default_factory=lambda: {})
+    id_: int
+    context: Dict
+    update_enum: 'Update'
+    process_status: str
+    previous_process_status: str
+    claimed: bool
 
 
 class DOADataLayer:
@@ -85,6 +94,7 @@ class DOADataLayer:
         self._table = None
         self._engine = None
         self._active_session = None
+        self._running_processes = {}
         
     def create_node(self, doa_node_cfg):
         name = doa_node_cfg.name
@@ -112,11 +122,15 @@ class DOADataLayer:
                       sa.Integer,
                       primary_key=True),
             sa.Column('status',
-                      sa.CHAR,
+                      sa.String,
                       server_default=ProcessStatus.WAITING.value),
-            sa.Column('create',
+            sa.Column('started',
                       sa.DateTime,
                       server_default=sa.sql.func.now()),
+            sa.Column('finished',
+                      sa.DateTime,
+                      server_default=None,
+                      nullable=True),
             sa.Column('dag',
                       sa.Text,
                       server_default=DOADataLayer.context_dump(self.dag.to_dict())),
@@ -125,11 +139,14 @@ class DOADataLayer:
             sa.Column('node_status',
                       sa.String,
                       server_default=node_status_default),
-            sa.Column('last_update_time',
+            sa.Column('updated_time',
                       sa.DateTime,
                       server_default=sa.sql.func.now(),
                       onupdate=sa.sql.func.now()),
-            sa.Column('last_update_node',
+            sa.Column('updated_previous_status',
+                      sa.String,
+                      server_default=ProcessStatus.UNKNOWN.value),
+            sa.Column('updated_node',
                       sa.Enum(self.update_enum),
                       server_default=self.update_enum(-1).name),
             sa.Column('error_traceback',
@@ -170,7 +187,7 @@ class DOADataLayer:
         self._active_session = None
         self._active_session_scope = None
 
-    def query_for_work(self, node_cfg):
+    def query_for_work(self, node_cfg, claim=True) -> Union[None, ProcessingContext]:
         table = self._table
         if self._active_session is None:
             raise ValueError('Use or with DOADataLayer(engine=) before querying the database')
@@ -178,29 +195,90 @@ class DOADataLayer:
         upstream_nodes = [getattr(self.update_enum, e.start.name.upper()).value
                           for e in node.incoming_edges]
         like_str = 'S'
-        own_idx = getattr(self.update_enum, node.name.upper()).value
+        own_enum = getattr(self.update_enum, node.name.upper())
         for i in range(len(self.dag)):
-            if i == own_idx:
+            if i == own_enum.value:
                 like_str += 'W'
             elif i in upstream_nodes:
                 like_str += 'S'
             else:
-                like_str += '*'
-        sq = self._active_session.query(table.c.last_update_time) \
-            .order_by(table.c.last_update_time.desc()).limit(1).with_for_update()
-        q = sa.update(table)  \
-            .where(sa.and_(table.c.last_update_time == sq.as_scalar(),
-                           table.c.node_status.like(like_str),
-                           table.c.status == ProcessStatus.WAITING.value))
-        res = self._active_session.execute(q)
+                like_str += '_'
+        sq = self._active_session.query(table.c.id, table.c.node_status, table.c.context) \
+            .filter(sa.and_(table.c.node_status.like(like_str),
+                            table.c.status == ProcessStatus.WAITING.value)) \
+            .order_by(table.c.updated_time.desc()).limit(1)
+        res = self._active_session.execute(sq).fetchone()
         if res is None:
-            raise ValueError
+            return None
+        id_, node_status, context = res
+        if claim:
+            new_status = list(node_status)
+            prev_status = new_status[own_enum.value + 1]
+            new_status[own_enum.value + 1] = NodeStatus.RUNNING.value
+            new_status = ''.join(new_status)
+            q = sa.update(table) \
+                .values(status=ProcessStatus.RUNNING.value,
+                        node_status=new_status,
+                        updated_node=own_enum.name,
+                        updated_previous_status=prev_status) \
+                .where(sa.and_(table.c.node_status == node_status,
+                               table.c.id == res[0],
+                               table.c.status == ProcessStatus.WAITING.value))
+            res = self._active_session.execute(q)
+            if res.rowcount == 0:
+                return None
         else:
-            print(type(res))
-            entry = res.fetchone()
-            print(entry)
-        
+            new_status = node_status
+        processing_context = ProcessingContext(
+            config=node_cfg,
+            id_=id_,
+            process_status=new_status,
+            previous_process_status=node_status,
+            update_enum=own_enum,
+            context=DOADataLayer.context_load(context),
+            claimed=claim)
+        return processing_context
 
+
+    def create_result_container(self, processing_context):
+        result_attributes = [('traceback', Union[str, None], dataclasses.field(default=None))]
+        for c in processing_context.config.dag_columns.get(self.name, {}).values():
+            result_attributes.append((c.name, Any, dataclasses.field(default=None)))
+        return dataclasses.make_dataclass('ResultContainer', result_attributes)
+    
+    def store_result(self, processing_context, result_container):
+        print('Storing Result')
+
+    def store_crash(self, processing_context, result_container):
+        new_status = list(processing_context.process_status)
+        new_status[processing_context.update_enum.value + 1] = NodeStatus.FAILED.value
+        new_status = ''.join(new_status)
+        q = sa.update(self._table) \
+                .values(error_traceback=result_container.traceback,
+                        finished=datetime.datetime.now(),
+                        node_status=new_status,
+                        updated_node=processing_context.update_enum.name,
+                        updated_previous_status=processing_context.process_status,
+                        status=ProcessStatus.FAILED.value) \
+                .where(self._table.c.id == processing_context.id_)
+        res = self._active_session.execute(q)
+
+    @contextmanager
+    def process(self, processing_context):
+        result_container = self.create_result_container(processing_context)
+
+        self._running_processes[processing_context.id_] = result_container
+        try:
+            yield result_container
+        except Exception as err:
+            buffer = io.StringIO()
+            traceback.print_exc(file=buffer)
+            result_container.traceback = buffer.getvalue()
+            self.store_crash(processing_context, result_container)
+        else:
+            self.store_result(processing_context, result_container)
+        finally:
+            del self._running_processes[processing_context.id_]
 
     def add_process(self, context={}):
         if self._active_session is None:
@@ -208,8 +286,6 @@ class DOADataLayer:
         q = self.table.insert().values(context=json.dumps(context))
         self._active_session.execute(q)
         
-
-
     def col(self, node_cfg, col, check_added=True):
         not_found_err = AttributeError(f'No column "{col}" found!')
         if check_added:

@@ -18,10 +18,12 @@ def test_doa_dag_build():
         node_c = doa_datalayer.create_node(config_node_c)
         node_a << node_c
         node_b >> node_a
-    with doa_datalayer(r'sqlite://'):
+    with doa_datalayer(r'sqlite:///test.sqlite'):
         doa_datalayer.add_process()
-        doa_datalayer.query_for_work(config_node_b)
-        doa_datalayer.query_for_work(config_node_a)
+        print(doa_datalayer.query_for_work(config_node_b, claim=False))
+        process_cxt = doa_datalayer.query_for_work(config_node_c)
+        with doa_datalayer.process(process_cxt) as result_container:
+            raise ValueError('JAJAJA')
 
 
 if __name__ == '__main__':
