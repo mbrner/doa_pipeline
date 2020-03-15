@@ -18,9 +18,7 @@ def test_doa_dag_build():
         node_c = doa_datalayer.create_node(config_node_c)
         node_a << node_c
         node_b >> node_a
-    print(len(doa_datalayer.dag))
-    with doa_datalayer(r'sqlite:///test.sqlite'):
-        print(config_node_a.test_col)
+    with doa_datalayer(r'sqlite://'):
         doa_datalayer.add_process()
         doa_datalayer.query_for_work(config_node_b)
         doa_datalayer.query_for_work(config_node_a)

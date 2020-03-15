@@ -15,6 +15,7 @@ from typing import (
     Union,
     cast)
 import enum
+from contextlib import contextmanager
 
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
@@ -44,6 +45,8 @@ class ProcessStatus(enum.Enum):
     PAUSED = 'P'
 
 
+
+
 @dataclasses.dataclass
 class DOANodeConfig:
     name: str
@@ -61,6 +64,12 @@ class DOANodeConfig:
             return self.col(name)
         except (IndexError, KeyError):
             raise AttributeError(f"'DOANodeConfig' has no ttribute '{name}'")
+
+@dataclasses.dataclass
+class ProcessingContext:
+    config: DOANodeConfig
+    dag_context: Dict
+    results: Dict = dataclasses.field(default_factory=lambda: {})
 
 
 class DOADataLayer:
@@ -97,10 +106,17 @@ class DOADataLayer:
         self.node_order = {n.name.upper(): i for i, n in  enumerate(sorted_nodes)}
         self.node_order['CONTEXT'] = -1
         self.update_enum = enum.Enum('Update', self.node_order)
+        node_status_default = ProcessStatus.SUCCESS.value + (ProcessStatus.WAITING.value * (len(self.node_order) - 1))
         table_cols = [
             sa.Column('id',
                       sa.Integer,
                       primary_key=True),
+            sa.Column('status',
+                      sa.CHAR,
+                      server_default=ProcessStatus.WAITING.value),
+            sa.Column('create',
+                      sa.DateTime,
+                      server_default=sa.sql.func.now()),
             sa.Column('dag',
                       sa.Text,
                       server_default=DOADataLayer.context_dump(self.dag.to_dict())),
@@ -108,7 +124,7 @@ class DOADataLayer:
                       sa.Text),
             sa.Column('node_status',
                       sa.String,
-                      server_default='S' + (ProcessStatus.WAITING.value * (len(self.node_order) - 1))),
+                      server_default=node_status_default),
             sa.Column('last_update_time',
                       sa.DateTime,
                       server_default=sa.sql.func.now(),
@@ -155,6 +171,7 @@ class DOADataLayer:
         self._active_session_scope = None
 
     def query_for_work(self, node_cfg):
+        table = self._table
         if self._active_session is None:
             raise ValueError('Use or with DOADataLayer(engine=) before querying the database')
         node = self.dag.find(node_cfg.name)
@@ -169,6 +186,21 @@ class DOADataLayer:
                 like_str += 'S'
             else:
                 like_str += '*'
+        sq = self._active_session.query(table.c.last_update_time) \
+            .order_by(table.c.last_update_time.desc()).limit(1).with_for_update()
+        q = sa.update(table)  \
+            .where(sa.and_(table.c.last_update_time == sq.as_scalar(),
+                           table.c.node_status.like(like_str),
+                           table.c.status == ProcessStatus.WAITING.value))
+        res = self._active_session.execute(q)
+        if res is None:
+            raise ValueError
+        else:
+            print(type(res))
+            entry = res.fetchone()
+            print(entry)
+        
+
 
     def add_process(self, context={}):
         if self._active_session is None:
