@@ -241,13 +241,35 @@ class DOADataLayer:
 
 
     def create_result_container(self, processing_context):
+        if not processing_context.claimed:
+            raise ValueError('Result containers can only be created for claimed processing_contexts.')
         result_attributes = [('traceback', Union[str, None], dataclasses.field(default=None))]
-        for c in processing_context.config.dag_columns.get(self.name, {}).values():
-            result_attributes.append((c.name, Any, dataclasses.field(default=None)))
+        for name, c in processing_context.config.dag_columns.get(self.name, {}).items():
+            try:
+                python_type = c.type.python_type
+            except NotImplementedError:
+                python_type = Any
+            result_attributes.append((name, python_type, dataclasses.field(default=None)))
         return dataclasses.make_dataclass('ResultContainer', result_attributes)
     
+
     def store_result(self, processing_context, result_container):
-        print('Storing Result')
+        new_status = list(processing_context.process_status)
+        new_status[processing_context.update_enum.value + 1] = NodeStatus.SUCCESS.value
+        new_status = ''.join(new_status)
+        values = {
+            'finished': datetime.datetime.now(),
+            'node_status': new_status,
+            'updated_previous_status': processing_context.process_status,
+            'status': ProcessStatus.SUCCESS.value,
+            'updated_node': processing_context.update_enum.name,
+        }
+        for name, c in processing_context.config.dag_columns.get(self.name, {}).items():
+            values[c.name] = getattr(result_container, name)
+        q = sa.update(self._table) \
+                .values(**values) \
+                .where(self._table.c.id == processing_context.id_)
+        res = self._active_session.execute(q)
 
     def store_crash(self, processing_context, result_container):
         new_status = list(processing_context.process_status)
