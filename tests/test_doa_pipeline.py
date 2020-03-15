@@ -20,8 +20,11 @@ def test_doa_dag_build():
         node_d = doa_datalayer.create_node(config_node_d)
         node_a << node_c
         node_b >> node_a
-        node_a >> node_d
-    with doa_datalayer(r'sqlite://'):#/test.sqlite'):
+        node_b >> node_d
+        node_c >> node_d
+
+    
+    with doa_datalayer(r'sqlite:///test.sqlite'):
         doa_datalayer.add_process()
         process_cxt = doa_datalayer.query_for_work(config_node_c)
         with doa_datalayer.process(process_cxt) as result_container:

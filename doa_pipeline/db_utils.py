@@ -16,12 +16,10 @@ def create_engine_context(engine):
         try:
             yield session
             session.commit()
-        except:
-            print('ERROR')
+        except Exception as err:
             session.rollback()
-            raise
+            raise err
         finally:
-            print('CLOSING')
             session.close()
     
     return session_scope
