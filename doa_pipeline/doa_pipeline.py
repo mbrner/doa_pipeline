@@ -1,3 +1,6 @@
+"""Module to providing the API to run a DAQ in a data oriented architecture.
+
+The central part in this architecture is a database. """
 import dataclasses
 import datetime
 import copy
@@ -88,11 +91,12 @@ class DOADataLayer:
     context_dump = json.dumps
     context_load = json.loads
 
-    def __init__(self, name):
+    def __init__(self, name, initial_columns=[]):
         self.name = name
         self.dag = DAG(name)
         self.columns = {}
         self.metadata = sa.MetaData()
+        self.initial_columns = initial_columns
         self._table = None
         self._engine = None
         self._active_session = None
@@ -157,6 +161,12 @@ class DOADataLayer:
                       server_default='')]
         for node in sorted_nodes:
             table_cols.extend([*self.columns.get(node, {}).values()])
+        used_names = set([c.name for c in table_cols])
+        for col in self.initial_columns:
+            if col.name in used_names:
+                raise ValueError(f'Name "{col.name}" is already used and can not be used for an intial column')
+            else:
+                table_cols.append(col)
         return sa.Table(f'{self.name}', self.metadata, *table_cols, extend_existing=True)
 
     def __call__(self, engine) -> "DOADataLayer":
@@ -378,14 +388,30 @@ class DOADataLayer:
         finally:
             del self._running_processes[processing_context.id_]
 
-    def add_process(self, context={}):
+    def add_process(self, context={}, **kwargs):
         if self._active_session is None:
             raise ValueError('Use or with DOADataLayer(engine=) before adding a process to the database.')
-        q = self.table.insert().values(context=json.dumps(context))
+        mandatory_kw = [c.name for c in self.initial_columns if c.default is None]
+        optional_kw = [c.name for c in self.initial_columns if c.default is not None]
+        values = {'context': DOADataLayer.context_dump(context)}
+        for kw in mandatory_kw:
+            try:
+                value = kwargs.pop(kw)
+            except KeyError:
+                raise ValueError(f'A kwarg "{kw}" has to be provided, because an initial column "{kw}" with no default is used')
+            else:
+                values[kw] = value
+        for kw in optional_kw:
+            try:
+                value = kwargs.pop(kw)
+            except KeyError:
+                pass
+            else:
+                values[kw] = value
+        q = self.table.insert().values(**values)
         res = self._active_session.execute(q)
         self._active_session.commit()
 
-        
     def col(self, node_cfg, col, check_added=True):
         not_found_err = AttributeError(f'No column "{col}" found!')
         if check_added:
