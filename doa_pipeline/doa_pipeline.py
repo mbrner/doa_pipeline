@@ -25,7 +25,7 @@ import io
 from collections.abc import Iterable
 
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
+from sqlalchemy.sql.expression import func as sql_func
 
 from .dag import DAG, Node
 from .db_utils import ArrayOfEnum, create_engine_context
@@ -55,7 +55,7 @@ class ProcessStatus(enum.Enum):
 
 
 class Paused(Exception):
-    def __init___(self, awaited_event=None):
+    def __init__(self, awaited_event=None, retry=False):
         msg = "Process is paused."
         if isinstance(awaited_event, str):
             if '>' in awaited_event or '<' in awaited_event:
@@ -65,6 +65,7 @@ class Paused(Exception):
             awaited_event = None
         Exception.__init__(self, msg)
         self.awaited_event = awaited_event
+        self.retry = retry
 
 
 @dataclasses.dataclass
@@ -91,7 +92,7 @@ class ProcessingContext:
     config: DOANodeConfig
     id_: int
     context: Dict
-    update_enum: 'Update'
+    update_enum: 'DataLayer'
     process_status: str
     previous_process_status: str
     claimed: bool
@@ -133,7 +134,7 @@ class DOADataLayer:
         sorted_nodes = self.dag.sorted_nodes
         self.node_order = {n.name.upper(): i for i, n in  enumerate(sorted_nodes)}
         self.node_order['CONTEXT'] = -1
-        self.update_enum = enum.Enum('Update', self.node_order)
+        self.update_enum = enum.Enum('DataLayer', self.node_order)
         node_status_default = ProcessStatus.SUCCESS.value + (ProcessStatus.WAITING.value * (len(self.node_order) - 1))
         table_cols = [
             sa.Column('id',
@@ -153,7 +154,8 @@ class DOADataLayer:
                       sa.Text,
                       server_default=DOADataLayer.context_dump(self.dag.to_dict())),
             sa.Column('context',
-                      sa.Text),
+                      sa.Text,
+                      server_default=''),
             sa.Column('node_status',
                       sa.String,
                       server_default=node_status_default),
@@ -171,7 +173,8 @@ class DOADataLayer:
                       sa.Text,
                       server_default=''),
             sa.Column('awaited_events',
-                      sa.Text),]
+                      sa.Text,
+                      server_default=''),]
         for node in sorted_nodes:
             table_cols.extend([*self.columns.get(node, {}).values()])
         used_names = set([c.name for c in table_cols])
@@ -390,21 +393,27 @@ class DOADataLayer:
     @contextmanager
     def process(self, processing_context):
         result_container = self.create_result_container(processing_context)
-
         self._running_processes[processing_context.id_] = result_container
         try:
             yield result_container
-        except Paused as interupt:
-                values = {'status': ProcessStatus.WAITING.value}
-                if interupt.awaited_event is not None:
-                    q = sa.update(self._table) \
-                        .values(status=ProcessStatus.RUNNING.value,
-                                node_status=new_status,
-                                updated_node=node_enum.name,
-                                updated_previous_status=prev_status) \
-                        .where(sa.and_(self._table.c.node_status == node_status,
-                                       self._table.c.id == id_,
-                                       self._table.c.status == ProcessStatus.WAITING.value))
+        except Paused as interrupt:
+            values = {'status': ProcessStatus.PAUSED.value,
+                      'updated_node': processing_context.update_enum}
+            if not interrupt.retry:
+                self.store_result(processing_context, result_container)
+            else:
+                new_status = list(processing_context.previous_process_status)
+                node_idx = processing_context.update_enum.value + 1
+                new_status[node_idx] = NodeStatus.WAITING.value
+                new_status = ''.join(new_status)
+                values['node_status'] = new_status
+            if interrupt.awaited_event is not None:
+                values['awaited_events'] = self._table.c.awaited_events + f'<{interrupt.awaited_event}>'
+            q = sa.update(self._table) \
+                .values(**values) \
+                .where(self._table.c.id == processing_context.id_)
+            res = self._active_session.execute(q)
+            self._active_session.commit()
 
         except Exception as err:
             buffer = io.StringIO()
@@ -439,6 +448,7 @@ class DOADataLayer:
         q = self.table.insert().values(**values)
         res = self._active_session.execute(q)
         self._active_session.commit()
+        return res.lastrowid
 
     def col(self, node_cfg, col, check_added=True):
         not_found_err = AttributeError(f'No column "{col}" found!')
@@ -468,3 +478,30 @@ class DOADataLayer:
                 raise not_found_err
         else:
             raise TypeError('"col" has to be int, str or sa.Column')
+
+    def call_out_event(self, event):
+        event = f'<{event}>'
+        q = sa.update(self._table) \
+                .values(updated_node='CONTEXT',
+                        status=ProcessStatus.WAITING.value,
+                        awaited_events=sql_func.replace(self._table.c.awaited_events, event, '')) \
+                .where(self._table.c.awaited_events.like(f'%{event}%'))
+        res = self._active_session.execute(q)
+        self._active_session.commit()
+
+    def resume(self, id_=None, force_resume=False):
+        values = {'updated_node': 'CONTEXT',
+                  'status': ProcessStatus.WAITING.value,
+                  'awaited_events': ''}
+        q = sa.update(self._table).values(**values)
+        where_conditions = [self._table.c.status == ProcessStatus.PAUSED.value]    
+        if id_:
+            where_conditions.append(self._table.c.id == id_)
+        if not force_resume:
+            where_conditions.append(self._table.c.awaited_events == '')
+        if len(where_conditions) > 1:
+            where_conditions = [sa.and_(*where_conditions)]
+        q = q.where(*where_conditions)
+        res = self._active_session.execute(q)
+        self._active_session.commit()
+            

@@ -248,6 +248,7 @@ def get_components(dag):
             visit(n, None)
     return look_up
 
+
 def depth_first_search(dag):
     """
     """

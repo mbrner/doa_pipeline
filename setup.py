@@ -14,7 +14,7 @@ setup(
     description='PoC for a pipeline engine build with an data oriented architecture.',
     long_description=long_description,
 
-    url='https://github.com/mbrner/doa',
+    url='https://github.com/mbrner/doa_pipeline',
 
     author='Mathis Boerner',
     author_email='mathis.boerner@googlemail.com',
