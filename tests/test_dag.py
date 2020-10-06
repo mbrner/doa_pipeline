@@ -80,7 +80,7 @@ def test_dag_store():
     dag_rec = DAG.from_dict(dag_dict)
     jsonified_dag = json.dumps(dag_rec.to_dict())
     dag_json_rec = DAG.from_dict(json.loads(jsonified_dag))
-    assert [n for n in dag.nodes] == [n for n in dag_rec.nodes]
-    assert [n.payload for n in dag.nodes] == [n.payload for n in dag_rec.nodes]
-    assert [n for n in dag.nodes] == [n for n in dag_json_rec.nodes]
-    assert [n.payload for n in dag.nodes] == [n.payload for n in dag_json_rec.nodes]
+    assert [n for n in dag.sorted_nodes] == [n for n in dag_rec.sorted_nodes]
+    assert [n.payload for n in dag.sorted_nodes] == [n.payload for n in dag_rec.sorted_nodes]
+    assert [n for n in dag.sorted_nodes] == [n for n in dag_json_rec.sorted_nodes]
+    assert [n.payload for n in dag.sorted_nodes] == [n.payload for n in dag_json_rec.sorted_nodes]

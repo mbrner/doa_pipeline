@@ -248,14 +248,10 @@ def get_components(dag):
             visit(n, None)
     return look_up
 
-                
-
-
-
 def depth_first_search(dag):
     """
     """
-    nodes = dag.nodes
+    nodes = sorted(dag.nodes, key=lambda x: x.name)
     sorted_nodes = []
     temporary_mark = set()
     permanent_mark = set()
