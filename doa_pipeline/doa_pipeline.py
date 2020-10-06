@@ -54,6 +54,17 @@ class ProcessStatus(enum.Enum):
     UNKNOWN = 'U'
 
 
+class Paused(Exception):
+    def __init___(self, awaited_event=None):
+        msg = "Process is paused."
+        if isinstance(awaited_event, str):
+            if '>' in awaited_event or '<' in awaited_event:
+                raise ValueError('Awaited events can not contain ">" and "<"')
+            msg += f' Waiting for event: "{awaited_event}"'
+        else:
+            awaited_event = None
+        Exception.__init__(self, msg)
+        self.awaited_event = awaited_event
 
 
 @dataclasses.dataclass
@@ -61,12 +72,12 @@ class DOANodeConfig:
     name: str
     version: str
     result_columns: List[sa.Column] = dataclasses.field(default_factory=lambda: [])
-    dag_columns: Dict[str, str] = dataclasses.field(default_factory=lambda: {})
+    _dag_columns: Dict[str, str] = dataclasses.field(default_factory=lambda: {})
 
     def col(self, name, doa_datalayer=None):
         if doa_datalayer is None:
             doa_datalayer = ACTIVE_DOA_PIPELINES[-1]
-        return self.dag_columns[doa_datalayer.name][name]
+        return self._dag_columns[doa_datalayer.name][name]
 
     def __getattr__(self, name):
         try:
@@ -115,7 +126,7 @@ class DOADataLayer:
                              'column_names': [node_columns[c.name].name for c in doa_node_cfg.result_columns]},
                     dag=self.dag)
         self.columns[node] = node_columns
-        doa_node_cfg.dag_columns[self.name] = node_columns
+        doa_node_cfg._dag_columns[self.name] = node_columns
         return node
 
     def build_db_table(self) -> sa.Table:
@@ -158,7 +169,9 @@ class DOADataLayer:
                       server_default=self.update_enum(-1).name),
             sa.Column('error_traceback',
                       sa.Text,
-                      server_default='')]
+                      server_default=''),
+            sa.Column('awaited_events',
+                      sa.Text),]
         for node in sorted_nodes:
             table_cols.extend([*self.columns.get(node, {}).values()])
         used_names = set([c.name for c in table_cols])
@@ -324,7 +337,7 @@ class DOADataLayer:
         if not processing_context.claimed:
             raise ValueError('Result containers can only be created for claimed processing_contexts.')
         result_attributes = [('traceback', Union[str, None], dataclasses.field(default=None))]
-        for name, c in processing_context.config.dag_columns.get(self.name, {}).items():
+        for name, c in processing_context.config._dag_columns.get(self.name, {}).items():
             try:
                 python_type = c.type.python_type
             except NotImplementedError:
@@ -348,7 +361,7 @@ class DOADataLayer:
             'status': status,
             'updated_node': processing_context.update_enum.name,
         }
-        for name, c in processing_context.config.dag_columns.get(self.name, {}).items():
+        for name, c in processing_context.config._dag_columns.get(self.name, {}).items():
             values[c.name] = getattr(result_container, name)
         q = sa.update(self._table) \
                 .values(**values) \
@@ -371,6 +384,9 @@ class DOADataLayer:
         res = self._active_session.execute(q)
         self._active_session.commit()
 
+    def pause_process(self, processing_context, awaited_event=None):
+        pass
+
     @contextmanager
     def process(self, processing_context):
         result_container = self.create_result_container(processing_context)
@@ -378,6 +394,18 @@ class DOADataLayer:
         self._running_processes[processing_context.id_] = result_container
         try:
             yield result_container
+        except Paused as interupt:
+                values = {'status': ProcessStatus.WAITING.value}
+                if interupt.awaited_event is not None:
+                    q = sa.update(self._table) \
+                        .values(status=ProcessStatus.RUNNING.value,
+                                node_status=new_status,
+                                updated_node=node_enum.name,
+                                updated_previous_status=prev_status) \
+                        .where(sa.and_(self._table.c.node_status == node_status,
+                                       self._table.c.id == id_,
+                                       self._table.c.status == ProcessStatus.WAITING.value))
+
         except Exception as err:
             buffer = io.StringIO()
             traceback.print_exc(file=buffer)
@@ -415,7 +443,7 @@ class DOADataLayer:
     def col(self, node_cfg, col, check_added=True):
         not_found_err = AttributeError(f'No column "{col}" found!')
         if check_added:
-            if self.name not in node_cfg.dag_columns.keys():
+            if self.name not in node_cfg._dag_columns.keys():
                 raise ValueError('node_cfg not used for this DAG')
         if isinstance(col, int):
             try:
@@ -440,6 +468,3 @@ class DOADataLayer:
                 raise not_found_err
         else:
             raise TypeError('"col" has to be int, str or sa.Column')
-
-
-        
